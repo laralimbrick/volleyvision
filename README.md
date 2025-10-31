@@ -9,12 +9,13 @@ Run locally
 - Step 5: Open the folder just extracted (volleyvision-main) in VS Code, go to File ▸ Open Folder…, select the volleyvision_ folder, and you should see these files: index.html, sketch.js, and assets-stupid-training-720p.mp4
 - Step 6: Expand the volleyvision-main folder in VS code, find the 'index.html' file, open it, right click in the opened folder and choose the 'Open with Live Server' option. This will run the project.
 
+On first run, follow the on-screen calibration prompts (click net bottom/top at left and right antennae).
+
+Keyboard Shortcuts:
 N = end rep and hide until end
 Z = undo point
 Space = play/pause , / . = frame step
 S = restart hidden
-
-On first run, follow the on-screen calibration prompts (click net bottom/top at left and right antennae).
 
 Pause video once ball reaches the hands of the setter (second touch), and click the screen.
 Let the ball reach its peak height in the set, pause the video and click the screen where the ball is again.
