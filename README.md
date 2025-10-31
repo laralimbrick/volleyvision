@@ -7,8 +7,7 @@ Run locally
 - Step 3: In Github https://github.com/laralimbrick/volleyvision, click on the big green button that says '<>Code', scroll down to the bottom and click 'Download Zip'.
 - Step 4: Unzip the the downloaded file - volleyvision-main.zip to its directory volleyvision-main
 - Step 5: Open the folder just extracted (volleyvision-main) in VS Code, go to File ▸ Open Folder…, select the volleyvision_ folder, and you should see these files: index.html, sketch.js, and assets-stupid-training-720p.mp4
-- Step 6: Expand the volleyvision-main folder in VS code, find the 'index.html' file, open it, right click in the opened folder and choose the 'Open with Live Server' option. This will run the project
-- Step 7: Click once to start the video, then use:
+- Step 6: Expand the volleyvision-main folder in VS code, find the 'index.html' file, open it, right click in the opened folder and choose the 'Open with Live Server' option. This will run the project.
 
 N = end rep and hide until end
 Z = undo point
