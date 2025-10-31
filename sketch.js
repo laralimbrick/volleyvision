@@ -1,88 +1,56 @@
 /**
  * === VolleyVision: p5.js video annotation for volleyball sets ===
  *
- * Features
- * - Plays a local MP4 inside a p5.js canvas.
- * - User “records” a rep by clicking the ball across frames to form a trail.
- * - Reps are coloured; they stay hidden during recording and reveal at the end.
- * - A replay dashboard (buttons) appears when the video ends.
- * - Calibration step converts screen pixels → real metres using the net (2.43 m).
- * - Computes per-rep PEAK HEIGHT (m and cm above net) + HORIZONTAL WIDTH (m).
- * - A stats table is rendered below the canvas at the end of the video.
- *
- * UX Notes
- * - Calibration is 4 clicks: Left Bottom (LB), Left Top (LT), Right Bottom (RB), Right Top (RT).
- * - No dark overlay during calibration; a top banner gives instructions.
- * - First click “primes” the video to guarantee a decodable frame is visible.
- *
- * Files
- * - index.html (loads p5.js and this file)
- * - sketch.js (this file)
- * - assets-stupid-training-720p.mp4
+ * Loads a training MP4, guides the user through a 4-click net calibration,
+ * records ball trails by clicking the video, and computes per-rep metrics:
+ *   - Peak height (m) and cm above net
+ *   - Horizontal width (m) and left/right direction
+ * A dashboard and a stats table are shown when the video finishes.
  */
 
 // ------------------------------ Global constants ------------------------------
 
-const NET_HEIGHT_M = 2.43; // Official men’s beach volleyball net height (metres)
+const NET_HEIGHT_M = 2.43; // Men’s beach volleyball net height in metres
 
 // ------------------------------ Video state -----------------------------------
 
-let vid;             // p5.MediaElement wrapping an HTML <video>
-let ready = false;   // becomes true when the video metadata/data is available
-let warmed = false;  // becomes true after we briefly play/pause to decode a frame
-let started = false; // becomes true after the user starts playback (post-calibration)
+let vid;             // p5.MediaElement that wraps the underlying <video>
+let ready = false;   // True once a decodable video frame is available
+let warmed = false;  // True after a brief play/pause to “prime” the first frame
+let started = false; // True after playback begins post-calibration
 
 // ------------------------------ Rep data --------------------------------------
 
 /**
- * A “rep” = { points: [{x,y,t}, ...], color: [r,g,b], peakM, aboveNetCM, widthM, direction }
- * - points.x/y are canvas pixel coordinates when the user clicked
- * - points.t is the video time of that click (seconds)
- * - color is the trail colour for that rep
- * - peakM = absolute peak height in metres (ground → ball)
- * - aboveNetCM = centimetres above the net at the peak point
- * - widthM = horizontal start→end distance (metres) across the set
- * - direction = '→' or '←' for left/right (purely cosmetic)
+ * A rep = one coloured trail with computed metrics.
+ * current = the rep being drawn; trails = completed reps.
  */
-let trails = [];                                 // all completed reps
-let current = { points: [], color: null };       // the rep currently being drawn
+let trails = [];                           // All reps finished so far
+let current = { points: [], color: null }; // Points clicked for the current rep
 
-// When the video ends, we set this so all reps render; during recording they stay hidden
-let showAllAtEnd = false;
-// Dashboard toggle to show/hide trails on the end screen
-let showTrails = true;
+let showAllAtEnd = false; // If true (on ended), reveal all trails
+let showTrails = true;    // Toggle to show/hide trails on end screen
 
 // ------------------------------ Calibration -----------------------------------
 
 /**
- * We measure the net in pixels by asking the user to click:
- *  1) Left-BOTTOM (LB)
- *  2) Left-TOP    (LT)
- *  3) Right-BOTTOM(RB)
- *  4) Right-TOP   (RT)
- *
- * From these points we compute:
- *  - pixelsPerMeter = (average net pixel height) / NET_HEIGHT_M
- *  - topLine: the equation of the top tape in image space (y = m*x + b).
- *    This lets us find the pixel y of the top tape at ANY x; useful for “above net” calc.
+ * User clicks the net at: LB, LT, RB, RT.
+ * From this we compute pixelsPerMeter and the top-tape line y = m*x + b.
  */
-let calibStep = 0;                                // 0..4 (4 means calibration finished)
-let calibPts = { LB: null, LT: null, RB: null, RT: null };
-let pixelsPerMeter = null;                        // conversion factor (px / m)
-let topLine = null;                               // { m, b } for the top tape
+let calibStep = 0;                                        // 0..4 (4 = done)
+let calibPts = { LB: null, LT: null, RB: null, RT: null };// Stores the 4 clicks
+let pixelsPerMeter = null;                                // px per metre
+let topLine = null;                                       // { m, b } for top tape
 
 // ------------------------------ UI widgets ------------------------------------
 
-let btnReplay, btnToggle, btnSnapshot, btnRestart, btnStats; // dashboard buttons
-let statsDiv;                 // HTML container under the canvas for the stats table
-let statsVisible = true;      // toggle to show/hide stats after the video ends
+let btnReplay, btnToggle, btnSnapshot, btnRestart, btnStats; // End-screen buttons
+let statsDiv;                 // Div under canvas to display the stats table
+let statsVisible = true;      // Whether the stats div is shown
 
 // ------------------------------ Colour palette --------------------------------
 
-/**
- * Distinct colours for each rep; we cycle through the palette.
- * Using fixed RGB values keeps colours stable between runs (useful for marking).
- */
+/** Distinct colours to cycle through for each rep. */
 const PALETTE = [
   [255, 80, 80],   // red
   [255, 160, 0],   // orange
@@ -92,48 +60,41 @@ const PALETTE = [
   [180, 120, 255], // purple
   [255, 100, 200], // pink
 ];
-let paletteIdx = 0;
-const nextColour = () => PALETTE[(paletteIdx++) % PALETTE.length].slice();
+let paletteIdx = 0; // Index into the palette
+const nextColour = () => PALETTE[(paletteIdx++) % PALETTE.length].slice(); // Return a copy
 
 // ------------------------------ Setup -----------------------------------------
 
 function setup() {
-  // Canvas matches video aspect here (960x540 ~ 16:9); change if your video differs
-  createCanvas(960, 540);
-  textFont('system-ui');
+  createCanvas(960, 540);         // 16:9 canvas to match the video
+  textFont('system-ui');          // UI font
 
-  // Create the <video>, but we’ll draw it on the canvas with image(vid, ...)
+  // Create the hidden HTML5 <video>, load the file, and render frames via image()
   vid = createVideo('assets-stupid-training-720p.mp4', () => console.log('video element created'));
-  vid.attribute('playsinline', ''); // stay inline on iOS instead of fullscreen
-  vid.attribute('muted', '');       // allow autoplay in browsers that require muted
-  vid.volume(0);                    // ensure silence
-  vid.hide();                       // hide the DOM element; we draw frames ourselves
+  vid.attribute('playsinline', ''); // iOS: keep inline playback
+  vid.attribute('muted', '');       // Allow autoplay policies to pass
+  vid.volume(0);                    // Ensure silence
+  vid.hide();                       // Don’t show the DOM video; draw it to canvas instead
 
-  // Once the browser has enough data to decode frames, mark ready.
+  // Mark as ready when the browser has enough data to decode a frame
   vid.elt.onloadeddata = () => { ready = true; };
-  // Extra hook some browsers fire when the first frame is ready to paint
-  vid.elt.oncanplay = () => { ready = true; };
+  vid.elt.oncanplay = () => { ready = true; }; // Some browsers use this
 
-  // Basic error logging if the video fails to load
+  // Log any load errors (bad path/codec)
   vid.elt.onerror = (e) => console.error('VIDEO ERROR', e);
 
-  // When playback naturally reaches the end:
+  // When playback reaches the end, reveal trails and show dashboard/stats
   vid.elt.onended = () => {
-    showAllAtEnd = true;   // reveal all trails
-    showTrails = true;
-
-    // compute summary metrics and render the stats table
-    computeAllRepMetrics(); // peak height + width per rep
-    renderStatsTable();
-
-    // show the dashboard (replay/toggle/save/restart/stats)
-    updateDashboard();
+    showAllAtEnd = true;                 // End screen mode
+    showTrails = true;                   // Default to showing trails
+    computeAllRepMetrics();              // Fill in metrics for each rep
+    renderStatsTable();                  // Build the HTML stats below the canvas
+    updateDashboard();                   // Show buttons
   };
 
-  // First rep colour
-  current.color = nextColour();
+  current.color = nextColour();          // Colour for the first rep
 
-  // Create the stats container (shown only when the video ends)
+  // --- Stats div (hidden at start) ---
   statsDiv = createDiv('');
   statsDiv.style('font-family', 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial');
   statsDiv.style('margin', '8px 0 0 0');
@@ -143,14 +104,14 @@ function setup() {
   statsDiv.style('color', '#fff');
   statsDiv.style('display', 'none');
 
-  // Create dashboard buttons (hidden until end)
+  // --- Dashboard buttons (created now, shown only at end) ---
   btnReplay   = createButton('▶ Replay (hide trails)');
   btnToggle   = createButton('🎨 Toggle trails');
   btnSnapshot = createButton('💾 Save snapshot (PNG)');
   btnRestart  = createButton('⏮ Restart video');
   btnStats    = createButton('📊 Show/Hide Stats');
 
-  // Shared button style for a clean, consistent look
+  // Shared button styling
   [btnReplay, btnToggle, btnSnapshot, btnRestart, btnStats].forEach((b) => {
     b.style('padding', '10px 14px');
     b.style('border-radius', '10px');
@@ -159,13 +120,11 @@ function setup() {
     b.style('box-shadow', '0 2px 10px rgba(0,0,0,0.15)');
     b.style('font-family', 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial');
     b.style('cursor', 'pointer');
-    b.hide(); // only visible after video ends
+    b.hide(); // Hidden until the end screen
   });
 
-  // ----- Dashboard actions -----
-
-  // Replay: rewind to 0, hide trails, clear current rep, play again
-  btnReplay.mousePressed(() => {
+  // --- Button actions ---
+  btnReplay.mousePressed(() => {           // Rewind and hide trails for a fresh pass
     showAllAtEnd = false;
     showTrails = false;
     statsDiv.style('display', 'none');
@@ -175,26 +134,22 @@ function setup() {
     updateDashboard();
   });
 
-  // Toggle whether trails are drawn on the end screen
-  btnToggle.mousePressed(() => {
+  btnToggle.mousePressed(() => {           // Toggle trail visibility at end
     showTrails = !showTrails;
     updateDashboard();
   });
 
-  // Save the canvas (with trails) as a PNG image
-  btnSnapshot.mousePressed(() => {
+  btnSnapshot.mousePressed(() => {         // Save the canvas as a PNG
     const prev = showTrails;
-    showTrails = true; // ensure trails are visible in the saved file
+    showTrails = true;                     // Ensure trails are visible in the snapshot
     redraw();
     saveCanvas('reps_snapshot', 'png');
     showTrails = prev;
   });
 
-  // Restart is like immediate replay (also available via keyboard “S”)
-  btnRestart.mousePressed(restartVideoHidden);
+  btnRestart.mousePressed(restartVideoHidden); // Restart any time
 
-  // Show/Hide the stats table below the canvas
-  btnStats.mousePressed(() => {
+  btnStats.mousePressed(() => {            // Show/Hide the stats HTML block
     statsVisible = !statsVisible;
     statsDiv.style('display', statsVisible ? 'block' : 'none');
   });
@@ -203,57 +158,53 @@ function setup() {
 // ------------------------------ Draw loop --------------------------------------
 
 function draw() {
-  background(0);
+  background(0);                         // Clear to black each frame
 
-  // Always draw the current video frame first (if available)
-  if (ready) image(vid, 0, 0, width, height);
+  if (ready) image(vid, 0, 0, width, height); // Draw current video frame when ready
 
-  // If the browser hasn’t produced a decodable frame yet, guide the user.
-  if (!warmed) {
-    centerMsg('Click once to load video');
-  }
+  if (!warmed) centerMsg('Click once to load video'); // Prompt to prime the video
 
-  // ---- CALIBRATION MODE (before any recording) ----
+  // ----- Calibration mode (before 4 clicks) -----
   if (calibStep < 4) {
-    if (!warmed) primeVideo(); // ensure a frame is visible during calibration
-    drawCalibrationBanner();
-    drawCalibrationMarkers();
-    drawHUD(true);
-    return; // stop here until calibration is done
+    if (!warmed) primeVideo();           // Brief play/pause to reveal the first frame
+    drawCalibrationBanner();             // Top instruction banner
+    drawCalibrationMarkers();            // Crosses where you’ve clicked
+    drawHUD(true);                       // Bottom status line
+    return;                              // Don’t draw trails/UI until calibration completes
   }
 
-  // ---- NORMAL MODE (after calibration) ----
+  // ----- Normal mode (after calibration) -----
   strokeWeight(4);
   noFill();
 
-  if (showAllAtEnd) {
+  if (showAllAtEnd) {                    // End screen: optionally draw all trails
     if (showTrails) {
       for (const rep of trails) {
         stroke(rep.color[0], rep.color[1], rep.color[2]);
         drawSmoothPath(rep.points);
       }
     }
-  } else {
+  } else {                               // Recording mode: draw only the current trail
     stroke(current.color[0], current.color[1], current.color[2]);
     drawSmoothPath(current.points);
   }
 
-  drawHUD(false);
-  updateDashboard();
+  drawHUD(false);                        // Status/instructions at the bottom
+  updateDashboard();                     // Keep buttons positioned/visible appropriately
 }
 
 // ------------------------------ Video priming ----------------------------------
 
 /**
- * Some browsers won’t show a decoded frame until playback begins.
- * We briefly play→pause (muted) to guarantee a frame exists for calibration.
+ * Briefly plays the video (muted) and pauses it to guarantee a decodable frame
+ * is available for calibration overlays.
  */
 function primeVideo() {
-  if (warmed) return;
+  if (warmed) return;                    // Only run once
   vid.volume(0);
-  const p = vid.play();
-  if (p && p.catch) p.catch(() => {}); // ignore autoplay promise errors
-  setTimeout(() => {
+  const p = vid.play();                  // Start playback (promise on some browsers)
+  if (p && p.catch) p.catch(() => {});   // Ignore autoplay errors
+  setTimeout(() => {                     // Pause shortly after to “freeze” a frame
     vid.pause();
     warmed = true;
     redraw();
@@ -265,13 +216,14 @@ function primeVideo() {
 function drawCalibrationBanner() {
   push();
   noStroke();
-  fill(0, 200);
+  fill(0, 200);                          // Semi-transparent black bar
   rect(0, 0, width, 56);
 
   fill(255);
   textSize(24);
   textAlign(LEFT, CENTER);
 
+  // Instruction changes based on which point we’re asking for
   let msg = '';
   if (calibStep === 0) msg = 'Calibration 1/4 — Click the BOTTOM of the net at the LEFT antenna';
   if (calibStep === 1) msg = 'Calibration 2/4 — Click the TOP of the net at the LEFT antenna';
@@ -281,13 +233,15 @@ function drawCalibrationBanner() {
   pop();
 }
 
+// Draw tiny crosses where the user has already clicked
 function drawCalibrationMarkers() {
-  if (calibPts.LB) drawCross(calibPts.LB.x, calibPts.LB.y, '#ff5757'); // bottom = red
-  if (calibPts.LT) drawCross(calibPts.LT.x, calibPts.LT.y, '#57c7ff'); // top = blue
+  if (calibPts.LB) drawCross(calibPts.LB.x, calibPts.LB.y, '#ff5757'); // red for bottom
+  if (calibPts.LT) drawCross(calibPts.LT.x, calibPts.LT.y, '#57c7ff'); // blue for top
   if (calibPts.RB) drawCross(calibPts.RB.x, calibPts.RB.y, '#ff5757');
   if (calibPts.RT) drawCross(calibPts.RT.x, calibPts.RT.y, '#57c7ff');
 }
 
+// Helper to draw a crosshair marker
 function drawCross(x, y, color) {
   push();
   stroke(color); strokeWeight(3);
@@ -303,6 +257,7 @@ function drawHUD(inCalibration) {
   noStroke();
   textSize(12);
 
+  // Construct a status string for the bottom-left HUD
   const paused = vid && vid.elt ? vid.elt.paused : true;
   const status = inCalibration
     ? 'Calibration mode'
@@ -313,6 +268,7 @@ function drawHUD(inCalibration) {
     12, height - 12
   );
 
+  // Pre-start instructions (after calibration, before first click to play)
   if (!started && !inCalibration) {
     centerMsg(
       'Click once to start video\n' +
@@ -321,11 +277,13 @@ function drawHUD(inCalibration) {
     );
   }
 
+  // Helpful tip while paused during recording
   if (!showAllAtEnd && started && !inCalibration && vid.elt.paused) {
     text('Tip: press N to end a rep (it hides until the end).', 12, 40);
   }
 }
 
+// Draw centered multi-line helper text
 function centerMsg(msg) {
   push();
   fill(255);
@@ -338,54 +296,55 @@ function centerMsg(msg) {
 // ------------------------------ Mouse interaction ------------------------------
 
 function mousePressed() {
-  if (!warmed) { primeVideo(); return; }
+  if (!warmed) { primeVideo(); return; } // First click may be used to prime the video
 
-  // Calibration clicks
+  // Handle the four calibration clicks in order
   if (calibStep < 4) {
-    const pt = { x: mouseX, y: mouseY };
-    if (calibStep === 0) calibPts.LB = pt;
-    else if (calibStep === 1) calibPts.LT = pt;
-    else if (calibStep === 2) calibPts.RB = pt;
-    else if (calibStep === 3) calibPts.RT = pt;
-    calibStep++;
-    if (calibStep === 4) finalizeCalibration();
-    return;
+    const pt = { x: mouseX, y: mouseY };      // Canvas coordinates of the click
+    if (calibStep === 0) calibPts.LB = pt;    // Left bottom
+    else if (calibStep === 1) calibPts.LT = pt; // Left top
+    else if (calibStep === 2) calibPts.RB = pt; // Right bottom
+    else if (calibStep === 3) calibPts.RT = pt; // Right top
+    calibStep++;                               // Advance to the next step
+    if (calibStep === 4) finalizeCalibration();// Build conversion line/scale
+    return;                                    // Don’t record rep points yet
   }
 
-  // Start playback after calibration
+  // First click after calibration starts playback
   if (!started) {
     const p = vid.play(); if (p && p.catch) p.catch(() => {});
     started = true;
     return;
   }
 
-  if (showAllAtEnd) return; // ignore clicks on end screen
+  if (showAllAtEnd) return;                    // Ignore clicks after the video ended
 
+  // Add a new point to the current rep (with video timestamp)
   current.points.push({ x: mouseX, y: mouseY, t: vid.time() });
 }
 
 // ------------------------------ Keyboard interaction ---------------------------
 
 function keyPressed() {
-  if (calibStep < 4) return;
+  if (calibStep < 4) return;                   // Disable shortcuts during calibration
 
-  if (key === ' ') {
+  if (key === ' ') {                           // Space: toggle play/pause
     if (vid.elt.paused) vid.play(); else vid.pause();
 
-  } else if (key === 'N' || key === 'n') {
+  } else if (key === 'N' || key === 'n') {     // N: finish current rep and start a new colour
     if (current.points.length) trails.push(current);
     current = { points: [], color: nextColour() };
 
-  } else if (key === 'Z' || key === 'z') {
+  } else if (key === 'Z' || key === 'z') {     // Z: undo last clicked point
     if (current.points.length) current.points.pop();
 
-  } else if (key === ',') {
+  } else if (key === ',') {                    // , : step backward ≈ 1 frame (1/30 s)
     if (!showAllAtEnd) { vid.pause(); vid.time(Math.max(0, vid.time() - 1 / 30)); }
 
-  } else if (key === '.') {
+  } else if (key === '.') {                    // . : step forward ≈ 1 frame
     if (!showAllAtEnd) { vid.pause(); vid.time(Math.min(vid.duration(), vid.time() + 1 / 30)); }
 
-  } else if (keyCode === ENTER) {
+  } else if (keyCode === ENTER) {              // Enter: replay from 0 and hide trails
     showAllAtEnd = false;
     showTrails = false;
     statsDiv.style('display', 'none');
@@ -393,34 +352,31 @@ function keyPressed() {
     vid.time(0); vid.play();
     updateDashboard();
 
-  } else if (key === 'S' || key === 's') {
+  } else if (key === 'S' || key === 's') {     // S: restart video immediately
     restartVideoHidden();
 
-  } else if (key === 'R' || key === 'r') {
+  } else if (key === 'R' || key === 'r') {     // R: full reset (wipe reps + calibration)
     trails = [];
     current = { points: [], color: nextColour() };
     showAllAtEnd = false; started = false; ready = false;
-
     calibStep = 0; calibPts = { LB: null, LT: null, RB: null, RT: null };
     pixelsPerMeter = null; topLine = null; warmed = false;
-
     statsDiv.style('display', 'none'); statsDiv.html('');
-    vid.time(0); vid.pause();
-    ready = true;
+    vid.time(0); vid.pause(); ready = true;
     updateDashboard();
   }
 }
 
 // ------------------------------ Calibration math -------------------------------
 
+/** Build px→m scale and top-of-net line from the four clicks. */
 function finalizeCalibration() {
-  const hLeft  = Math.abs(calibPts.LT.y - calibPts.LB.y);
-  const hRight = Math.abs(calibPts.RT.y - calibPts.RB.y);
-  const hAvgPx = (hLeft + hRight) / 2;
+  const hLeft  = Math.abs(calibPts.LT.y - calibPts.LB.y); // Pixel height at left antenna
+  const hRight = Math.abs(calibPts.RT.y - calibPts.RB.y); // Pixel height at right antenna
+  const hAvgPx = (hLeft + hRight) / 2;                    // Average to reduce perspective error
+  pixelsPerMeter = hAvgPx / NET_HEIGHT_M;                 // Convert px to metres
 
-  pixelsPerMeter = hAvgPx / NET_HEIGHT_M;
-
-  // line through the two top-tape points (LT and RT)
+  // Top tape line through LT and RT: y = m*x + b
   const m = (calibPts.RT.y - calibPts.LT.y) / (calibPts.RT.x - calibPts.LT.x);
   const b = calibPts.LT.y - m * calibPts.LT.x;
   topLine = { m, b };
@@ -428,13 +384,15 @@ function finalizeCalibration() {
   console.log('Calibration complete:', { hLeft, hRight, hAvgPx, pixelsPerMeter, topLine });
 }
 
+/** Metres the point is ABOVE (+) or BELOW (–) the net tape at the same x. */
 function metersAboveNetAtPoint(x, y) {
   if (!pixelsPerMeter || !topLine) return null;
-  const yTop = topLine.m * x + topLine.b; // pixel y of top tape at this x
-  const dyPx = (yTop - y);                // pixel difference (screen y grows downward)
-  return dyPx / pixelsPerMeter;           // convert pixels → metres
+  const yTop = topLine.m * x + topLine.b; // Pixel y of the tape at this x
+  const dyPx = (yTop - y);                // Positive if point is above (screen y grows downward)
+  return dyPx / pixelsPerMeter;           // Convert pixel delta to metres
 }
 
+/** Approx horizontal distance (metres) from p1 to p2 in screen space. */
 function metersHorizDistance(p1, p2) {
   if (!pixelsPerMeter) return null;
   const dxPx = Math.abs(p2.x - p1.x);
@@ -443,49 +401,49 @@ function metersHorizDistance(p1, p2) {
 
 // ------------------------------ Metrics per rep --------------------------------
 
+/** Fill in peak height, above-net cm, width, and direction for each rep. */
 function computeAllRepMetrics() {
   for (const rep of trails) {
-    if (!rep.points || rep.points.length < 2) {
-      rep.peakM = null;
-      rep.aboveNetCM = null;
-      rep.widthM = null;
-      rep.direction = null;
+    if (!rep.points || rep.points.length < 2) {     // Need at least two points
+      rep.peakM = null; rep.aboveNetCM = null; rep.widthM = null; rep.direction = null;
       continue;
     }
 
-    // 1) Peak height above the net (metres)
-    let peakAboveM = -Infinity;
+    // ---- Peak height above the net (metres) ----
+    let peakAboveM = -Infinity;                      // Track max “above net” value
     for (const p of rep.points) {
-      const a = metersAboveNetAtPoint(p.x, p.y);
+      const a = metersAboveNetAtPoint(p.x, p.y);     // metres above (+) / below (–) at this click
       if (a != null && a > peakAboveM) peakAboveM = a;
     }
     if (!isFinite(peakAboveM)) {
-      rep.peakM = null;
+      rep.peakM = null;                              // Couldn’t compute
       rep.aboveNetCM = null;
     } else {
-      rep.peakM = NET_HEIGHT_M + peakAboveM;          // absolute height from ground
-      rep.aboveNetCM = Math.round(peakAboveM * 100);  // centimetres above the net
+      rep.peakM = NET_HEIGHT_M + peakAboveM;         // Absolute peak height from floor
+      rep.aboveNetCM = Math.round(peakAboveM * 100); // Centimetres above the tape
     }
 
-    // 2) Horizontal width from first → last point (metres)
+    // ---- Horizontal width (metres) from first → last point ----
     const start = rep.points[0];
     const end   = rep.points[rep.points.length - 1];
     const wM = metersHorizDistance(start, end);
     rep.widthM = (wM != null) ? wM : null;
 
-    // Directional arrow purely for display
+    // Directional arrow for readability
     rep.direction = (end.x > start.x) ? '→' : (end.x < start.x ? '←' : '•');
   }
 }
 
 // ------------------------------ Stats table (HTML) -----------------------------
 
+/** Build a neat HTML table summarising each rep and overall best/averages. */
 function renderStatsTable() {
-  const rows = [];
-  let bestIdx = -1, bestVal = -Infinity;
-  let sumPeak = 0, nPeak = 0;
-  let sumWidth = 0, nWidth = 0;
+  const rows = [];                      // Rows to render
+  let bestIdx = -1, bestVal = -Infinity;// Track highest absolute peak
+  let sumPeak = 0, nPeak = 0;           // For average peak
+  let sumWidth = 0, nWidth = 0;         // For average width
 
+  // Assemble row data and summary accumulators
   for (let i = 0; i < trails.length; i++) {
     const r = trails[i];
 
@@ -507,9 +465,11 @@ function renderStatsTable() {
     });
   }
 
+  // Compute simple averages
   const avgPeak  = nPeak  ? (sumPeak  / nPeak)  : null;
   const avgWidth = nWidth ? (sumWidth / nWidth) : null;
 
+  // Build HTML string for the table (kept inline for portability)
   let html = `
     <div style="font-size:14px; line-height:1.4">
       <div style="margin-bottom:8px; font-weight:600">SET STATS (Net = ${NET_HEIGHT_M.toFixed(2)} m)</div>
@@ -525,6 +485,7 @@ function renderStatsTable() {
         <tbody>
   `;
 
+  // Render each row with colour dot + metrics
   rows.forEach((row) => {
     const clr = `rgb(${row.color[0]},${row.color[1]},${row.color[2]})`;
     const peakTxt  = row.peakM  != null ? row.peakM.toFixed(2)  : '—';
@@ -549,6 +510,7 @@ function renderStatsTable() {
       </table>
   `;
 
+  // Add summary lines
   if (bestIdx >= 0) {
     html += `<div style="margin-top:8px">🏅 <b>Highest Peak:</b> Rep ${bestIdx + 1} (${bestVal.toFixed(2)} m)</div>`;
   }
@@ -559,57 +521,60 @@ function renderStatsTable() {
     html += `<div><b>Average Width:</b> ${avgWidth.toFixed(2)} m</div>`;
   }
 
-  html += `</div>`;
+  html += `</div>`;                 // Close wrapper
 
-  statsDiv.html(html);
-  statsDiv.style('display', 'block');
-  statsVisible = true;
+  statsDiv.html(html);              // Inject HTML into the div
+  statsDiv.style('display', 'block'); // Make it visible
+  statsVisible = true;              // Track visibility state
 }
 
 // ------------------------------ Dashboard layout -------------------------------
 
+/** Position buttons along the bottom when we’re on the end screen. */
 function updateDashboard() {
   if (showAllAtEnd && calibStep >= 4) {
-    const pad = 12, gap = 10, btnW = 190, btnH = 40;
+    const pad = 12, gap = 10, btnW = 190, btnH = 40; // Layout constants
 
+    // Position each button left→right along the bottom
     btnReplay.position(  pad,                       height - btnH - pad );
     btnToggle.position(  pad + btnW + gap,         height - btnH - pad );
     btnSnapshot.position(pad + (btnW + gap) * 2,   height - btnH - pad );
     btnRestart.position( pad + (btnW + gap) * 3,   height - btnH - pad );
     btnStats.position(   pad + (btnW + gap) * 4,   height - btnH - pad );
 
-    btnReplay.show();
-    btnToggle.show();
-    btnSnapshot.show();
-    btnRestart.show();
-    btnStats.show();
+    // Ensure they’re visible
+    btnReplay.show(); btnToggle.show(); btnSnapshot.show(); btnRestart.show(); btnStats.show();
 
+    // Update the toggle button label
     btnToggle.html(showTrails ? '🎨 Hide trails' : '🎨 Show trails');
   } else {
+    // Hide all when not on the end screen
     [btnReplay, btnToggle, btnSnapshot, btnRestart, btnStats].forEach(b => b.hide());
   }
 }
 
 // ------------------------------ Drawing helpers --------------------------------
 
+/** Draw a smooth line through a list of points using curve vertices. */
 function drawSmoothPath(points) {
   if (!points || points.length < 2) return;
   beginShape();
-  curveVertex(points[0].x, points[0].y);
-  for (const p of points) curveVertex(p.x, p.y);
-  curveVertex(points[points.length - 1].x, points[points.length - 1].y);
+  curveVertex(points[0].x, points[0].y);                  // Lead-in control point
+  for (const p of points) curveVertex(p.x, p.y);          // Main vertices
+  curveVertex(points[points.length - 1].x, points[points.length - 1].y); // Lead-out
   endShape();
 }
 
+/** Restart helper used by the button and the “S” key. */
 function restartVideoHidden() {
-  showAllAtEnd = false;
-  showTrails = false;
-  statsDiv.style('display', 'none');
-  current = { points: [], color: nextColour() };
-  vid.time(0);
-  vid.play();
-  started = true;
-  updateDashboard();
+  showAllAtEnd = false;                 // Leave end screen
+  showTrails = false;                   // Hide old trails for a clean view
+  statsDiv.style('display', 'none');    // Hide stats
+  current = { points: [], color: nextColour() }; // Fresh rep
+  vid.time(0);                          // Seek to start
+  vid.play();                           // Play again
+  started = true;                       // Mark as started
+  updateDashboard();                    // Hide buttons again
 }
 
 
